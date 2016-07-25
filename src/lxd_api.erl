@@ -10,8 +10,10 @@
 
 -behaviour(gen_server).
 
+-include("lxd_api.hrl").
+
 %% API
--export([start_link/3, create/2, create/3]).
+-export([start_link/3, connect/2, connect/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -20,12 +22,12 @@
 -define(SERVER, ?MODULE).
 -define(DEFAULT_FINGER_PRINT, <<"">>).
 
--record(tag, {data = [] :: list(), type = type :: term()}).
-
--record(state, {server   ,
-                port         , %%:: pos_integer(),
-                finger_print  %%:: binary()
+-record(state, {server       :: string(),
+                port         :: pos_integer(),
+                finger_print :: binary(),
+                http_opts    :: list()
                }).
+
 
 %%%===================================================================
 %%% API
@@ -63,11 +65,28 @@
 %%  https://github.com/lxc/lxd/blob/master/doc/rest-api.md
 
 %% @doc Create LXC serer connection
-create(Server, Port) ->
-    create(Server, Port, ?DEFAULT_FINGER_PRINT).
+connect(Server, Port) ->
+    connect(Server, Port, ?DEFAULT_FINGER_PRINT).
 
-create(Server, Port, Fingerprint) ->
+connect(Server, Port, Fingerprint) ->
     lxd_api_sup:start_child(Server, Port, Fingerprint).
+
+
+'GET'(Lxd, Endpoint) ->
+    gen_server:call(Lxd, {get, Endpoint}).
+
+'PUT'(Lxd, Endpoint, Data) ->
+    gen_server:call(Lxd, {put, Endpoint, Data}).
+
+'PATCH'(Lxd, Endpoint, Data) ->
+    gen_server:call(Lxd, {patch, Endpoint, Data}).
+
+'POST'(Lxd, Endpoint, Data) ->
+    gen_server:call(Lxd, {post, Endpoint, Data}).
+
+'DELETE'(Lxd, Endpoint) ->
+    gen_server:call(Lxd, {delete, Endpoint}).
+
 
 
 %%--------------------------------------------------------------------
@@ -96,9 +115,19 @@ start_link(Server, Port, Fingerprint) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Server, Port, Fingerprint]) ->
+    Home = os:getenv("HOME"),
+    Cert = Home ++ "/.config/lxc/client.crt",
+    CertKey = Home ++ "/.config/lxc/client.key",
+    SSLOptions = [%{verify, no},
+                  {certfile, Cert},
+                  {keyfile, CertKey}
+                 ],
+    HTTPOptions = [{ssl, SSLOptions}],
+
     {ok, #state{server = Server,
                 port = Port,
-                finger_print = Fingerprint
+                finger_print = Fingerprint,
+                http_opts = HTTPOptions
                }}.
 
 %%--------------------------------------------------------------------
@@ -115,9 +144,44 @@ init([Server, Port, Fingerprint]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+
+
+
+handle_call( {get, [certificates]}, _From, State) ->
+    {reply, ok, State};
+
+handle_call({get, [certificates, Fingerprint]}, _From, State)->
+    {reply, ok, State};
+
+
+%% handle_call({get, [containers]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [containers, Name]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [containers, Name, exec]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [containers, Name, files]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [containers, Name, snapshots]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [containers, Name, snapshots, Name]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [containers, Name, state]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [containers, Name, logs]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [containers, Name, logs, Logfile]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [events]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [images]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [images, Fingerprint]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [images, Fingerprint, export]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [images, aliases]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [images, aliases, Name]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [networks]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [networks, Name]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [operations]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [operations, Uuid]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [operations, Uuid, wait]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [operations, Uuid, websocket]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [profiles]}, _From, State)-> {reply, ok, State};
+%% handle_call({get, [profiles, Name]}, _From, State)->     {reply, ok, State};
+
 handle_call(_Request, _From, State) ->
-    Reply = ok,
+    Reply = {error, notsupported},
     {reply, Reply, State}.
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -189,3 +253,20 @@ code_change(_OldVsn, State, _Extra) ->
 %% snapshot - Create a read-only snapshot of a container.
 %% start  - Changes state of one or more containers to start.
 %% stop   - Changes state of one or more containers to stop.
+
+%% status codes: Code	Meaning
+status_code(100) ->	'OperationCreated';
+status_code(101) ->	'Started';
+status_code(102) ->	'Stopped';
+status_code(103) ->	'Running';
+status_code(104) ->	'Cancelling';
+status_code(105) ->	'Pending';
+status_code(106) ->	'Starting';
+status_code(107) ->	'Stopping';
+status_code(108) ->	'Aborting';
+status_code(109) ->	'Freezing';
+status_code(110) ->	'Frozen';
+status_code(111) ->	'Thawed';
+status_code(200) ->	'Success';
+status_code(400) ->	'Failure';
+status_code(401) ->	'Cancelled'.

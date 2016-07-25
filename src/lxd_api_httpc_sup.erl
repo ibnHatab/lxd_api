@@ -3,12 +3,12 @@
 %% @end
 %%%-------------------------------------------------------------------
 
--module(lxd_api_sup).
+-module(lxd_api_httpc_sup).
 
 -behaviour(supervisor).
 
 %% API
--export([start_link/0]).
+-export([start_link/0, start_child/1]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -22,21 +22,21 @@
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
+start_child(Request) ->
+    supervisor:start_child(?SERVER, [Request]).
+
 %%====================================================================
 %% Supervisor callbacks
 %%====================================================================
 
 init([]) ->
-    SupFlags = #{strategy => one_for_one, intensity => 1, period => 5},
-    ChildSupSpecs = [#{id => lxd_api_assoc_sup,
-                    start => {lxd_api_assoc_sup, start_link, []},
-                    restart => transient,
-                    type => supervisor},
-                  #{id => lxd_api_httpc_sup,
-                    start => {lxd_api_httpc_sup, start_link, []},
-                    restart => transient,
-                    type => supervisor}],
-    {ok, {SupFlags, ChildSupSpecs}}.
+    SupFlags = #{strategy => simple_one_for_one,
+                 intensity => 0,
+                 period => 1},
+    ChildSpecs = [#{id => lxd_api_httpc,
+                    start => {lxd_api_httpc, start_link, []},
+                    shutdown => brutal_kill}],
+    {ok, {SupFlags, ChildSpecs}}.
 
 %%====================================================================
 %% Internal functions
