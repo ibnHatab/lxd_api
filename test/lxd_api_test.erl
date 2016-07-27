@@ -47,7 +47,7 @@ standard() ->
 
     Req = #http_request{server = "135.247.171.177", port = 8443, operation = 'GET',
                         resource = "", data = [], opts = opts() },
-    Rep = lxd_api_httpc:service(Req),
+    {ok, Rep} = lxd_api_httpc:service(Req),
     ?assertEqual(maps:get(<<"status_code">>, Rep#http_reply.json),
                  Rep#http_reply.status).
 
@@ -96,10 +96,10 @@ background() ->
                                     ]
                                    }
                ),
-    %% user_default:dbgon(jsx, decode),
+    user_default:dbgon(lxd_api_httpc, async_operation),
     Req = #http_request{server = "135.247.171.177", port = 8443, operation = 'GET',
                         resource = [containers], data = [], opts = opts() },
-    Rep = lxd_api_httpc:service(Req),
+    {ok, Rep} = lxd_api_httpc:service(Req),
     ?assertEqual(maps:get(<<"status_code">>, Rep#http_reply.json),
                  Rep#http_reply.status).
 
@@ -123,7 +123,7 @@ error_and_failure() ->
 
     Req = #http_request{server = "135.247.171.177", port = 8443, operation = 'GET',
                         resource = "", data = [], opts = opts() },
-    Rep = lxd_api_httpc:service(Req),
+    {ok, Rep} = lxd_api_httpc:service(Req),
     ?assertEqual(maps:get(<<"error_code">>, Rep#http_reply.json),
                  Rep#http_reply.status).
 

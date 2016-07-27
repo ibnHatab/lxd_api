@@ -19,8 +19,6 @@
 
 %% API
 -export([start_link/2, service/1]).
--export_record([http_request, http_reply]).
-
 
 %% gen_fsm callbacks
 -export([init/1, send_request/2, async_operation/2,
@@ -32,11 +30,12 @@
 
 -record(state, { original_request :: http_request(),
                  from :: pid(),
-                 async_operation :: string()
+                 async_operation :: string(),
+                 backoff = 300 :: pos_integer()
                }).
 
--define(OPERATION_TIMEOUT, 5000).
--define(OPERATION_PULL_TIMER, 1000).
+-define(OPERATION_TIMEOUT, 50000).
+-define(OPERATION_PULL_TIMER, 10000).
 -define(API, "1.0").
 
 %%%===================================================================
@@ -46,12 +45,18 @@
 %% @doc
 %% Interrogate LXD server with REST operation
 service(Request) ->
+    service(Request, ?OPERATION_TIMEOUT).
+service(Request, Timeout) ->
     {ok, Worker} = lxd_api_httpc_sup:start_child(Request, self()),
     gen_fsm:send_event(Worker, go),
-    receive {reply, Worker, Reply} -> Reply;
-            _Any -> io:format(">> missing: ~p~n", [_Any]),
-                    []
-    after ?OPERATION_TIMEOUT -> {error, operation_timeout}
+    receive
+        {reply, Worker, Reply} ->
+            {ok, Reply};
+        Any ->
+            lager:error("Unexpected message from HTTPC handler", Any),
+            {error, {unexpected_message_in_mailbox, Any}}
+    after Timeout ->
+            {error, operation_timeout}
     end.
 
 %%--------------------------------------------------------------------
@@ -81,15 +86,15 @@ init([Request, From]) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
-send_request(go, #state{ original_request = Request, from = From} = State) ->
+send_request(go, #state{ original_request = Request, from = From, backoff = Backoff} = State) ->
     #http_request{ server = Server, port = Port, operation = Operatin,
                    resource = Resource, data = Data, opts = Opts } = Request,
-    Url = build_url(Server, Port, Resource),
+    Url = build_url(Server, Port, Resource, ?API),
 
     {ok, #http_reply{ status = StatusCode, json = JSON} = Reply} =
         case Operatin of
-            'GET' ->  http_get(Url, Opts);
-            'PUT' ->  http_put(Url, Data, Opts)
+            'GET'  ->  http_get(Url, Opts);
+            'POST' ->  http_post(Url, Data, Opts)
         end,
 
     case status_code(StatusCode) of
@@ -98,13 +103,14 @@ send_request(go, #state{ original_request = Request, from = From} = State) ->
             {stop, normal, State};
         'OperationCreated' ->
             Operation = maps:get(<<"operation">>, JSON),
-            {next_state, async_operation, State#state{ async_operation = erlang:binary_to_list(Operation) }, ?OPERATION_PULL_TIMER};
+            {next_state, async_operation, State#state{ async_operation = erlang:binary_to_list(Operation)}, Backoff};
         'Failure' ->
             From ! {reply, self(), Reply},
             {stop, normal, State}
     end.
 
-async_operation(timeout, #state{ original_request = Request, from = From, async_operation = AsyncOperation} = State) ->
+async_operation(timeout, #state{ original_request = Request, from = From,
+                                 async_operation = AsyncOperation, backoff = Backoff} = State) ->
     #http_request{ server = Server, port = Port, opts = Opts } = Request,
     Url = build_url(Server, Port, AsyncOperation),
 
@@ -114,7 +120,11 @@ async_operation(timeout, #state{ original_request = Request, from = From, async_
             From ! {reply, self(), Reply},
             {stop, normal, State};
         'Running' ->
-            {next_state, async_operation, State, ?OPERATION_PULL_TIMER}
+            RetryTimer = increment(Backoff, ?OPERATION_PULL_TIMER),
+            {next_state, async_operation, State#state{backoff = RetryTimer}, RetryTimer};
+        'Failure' ->
+            From ! {reply, self(), Reply},
+            {stop, normal, State}
     end.
 %%--------------------------------------------------------------------
 %% @private
@@ -229,9 +239,16 @@ http_get(Url, Opts) ->
 
     {ok, #http_reply{ status = StatusCode, json = JSON} }.
 
-http_put(Url, Data, Opts) ->
-    { ok, {Status, Header, Body} } = httpc:request(get, {Url, []}, Opts, []),
-    {ok, #http_reply{}}.
+http_post(Url, Data, Opts) ->
+    { ok, {Status, Header, Body} } = httpc:request(post, {Url, [], "application/json", Data}, Opts),
+
+    JSON = case proplists:get_value("content-type", Header) of
+               "application/json" -> jsx:decode(erlang:list_to_binary(Body), [return_maps]);
+               _ -> Body
+           end,
+    StatusCode = check_status(Status),
+
+    {ok, #http_reply{ status = StatusCode, json = JSON} }.
 
 check_status({"HTTP/1.1", Code, _}) -> Code.
 
@@ -255,7 +272,8 @@ encode_resource([Head|Tail], Acc) when is_atom(Head) ->
 encode_resource([Head|Tail], Acc) when is_list(Head) ->
     encode_resource(Tail, Acc ++ "/" ++ Head).
 
-
+increment(N) when is_integer(N) -> N bsl 1.
+increment(N, Max) -> min(increment(N), Max).
 
 -ifdef(TEST).
 
