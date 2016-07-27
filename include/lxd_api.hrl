@@ -11,7 +11,7 @@
 
 -record(http_reply, {
           status,
-          body,
+          json,
           etag
          }).
 

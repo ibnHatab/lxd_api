@@ -12,27 +12,31 @@
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-export([http_get/2]).
 -endif.
 
 -include("lxd_api.hrl").
 
 %% API
--export([start_link/1, service/1]).
+-export([start_link/2, service/1]).
 -export_record([http_request, http_reply]).
 
 
 %% gen_fsm callbacks
--export([init/1, send_request/2, send_request/3, handle_event/3,
+-export([init/1, send_request/2, async_operation/2,
+         handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3, code_change/4]).
 
 -define(SERVER, ?MODULE).
 
 
 -record(state, { original_request :: http_request(),
-                 partial_reply :: http_reply()
+                 from :: pid(),
+                 async_operation :: string()
                }).
 
--define(RECV_TIMEOUT, 5000).
+-define(OPERATION_TIMEOUT, 5000).
+-define(OPERATION_PULL_TIMER, 1000).
 -define(API, "1.0").
 
 %%%===================================================================
@@ -42,20 +46,22 @@
 %% @doc
 %% Interrogate LXD server with REST operation
 service(Request) ->
-    lxd_api_sup:start_child(Request).
-
+    {ok, Worker} = lxd_api_httpc_sup:start_child(Request, self()),
+    gen_fsm:send_event(Worker, go),
+    receive {reply, Worker, Reply} -> Reply;
+            _Any -> io:format(">> missing: ~p~n", [_Any]),
+                    []
+    after ?OPERATION_TIMEOUT -> {error, operation_timeout}
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc
 %% Creates a gen_fsm process which calls Module:init/1 to
-%% initialize. To ensure a synchronized start-up procedure, this
-%% function does not return until Module:init/1 has returned.
-%%
-%% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
+%% initialize.
 %% @end
 %%--------------------------------------------------------------------
-start_link(Request) ->
-    gen_fsm:start_link(?MODULE, [Request], []).
+start_link(Request, From) ->
+    gen_fsm:start_link(?MODULE, [Request, From], []).
 
 %%%===================================================================
 %%% gen_fsm callbacks
@@ -64,73 +70,52 @@ start_link(Request) ->
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% Whenever a gen_fsm is started using gen_fsm:start/[3,4] or
-%% gen_fsm:start_link/[3,4], this function is called by the new
-%% process to initialize.
-%%
-%% @spec init(Args) -> {ok, StateName, State} |
-%%                     {ok, StateName, State, Timeout} |
-%%                     ignore |
-%%                     {stop, StopReason}
 %% @end
 %%--------------------------------------------------------------------
-init([Request]) ->
-    process_flag(trap_exit, true),
-    {ok, send_request, #state{ original_request = Request}}.
+init([Request, From]) ->
+%    process_flag(trap_exit, true),
+    {ok, send_request, #state{ original_request = Request, from = From}}.
 
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
-%% There should be one instance of this function for each possible
-%% state name. Whenever a gen_fsm receives an event sent using
-%% gen_fsm:send_event/2, the instance of this function with the same
-%% name as the current state name StateName is called to handle
-%% the event. It is also called if a timeout occurs.
-%%
-%% @spec send_request(Event, State) ->
-%%                   {next_state, NextStateName, NextState} |
-%%                   {next_state, NextStateName, NextState, Timeout} |
-%%                   {stop, Reason, NewState}
 %% @end
 %%--------------------------------------------------------------------
-send_request(_Event, #state{ original_request = Request} = State) ->
+send_request(go, #state{ original_request = Request, from = From} = State) ->
     #http_request{ server = Server, port = Port, operation = Operatin,
                    resource = Resource, data = Data, opts = Opts } = Request,
     Url = build_url(Server, Port, Resource),
-    {ok, Status, Header, Body} =
+
+    {ok, #http_reply{ status = StatusCode, json = JSON} = Reply} =
         case Operatin of
-            'GET' ->
-                http_get(Url, Opts);
-            'PUT' ->
-                http_put(Url, Data, Opts)
+            'GET' ->  http_get(Url, Opts);
+            'PUT' ->  http_put(Url, Data, Opts)
         end,
 
+    case status_code(StatusCode) of
+        'Success' ->
+            From ! {reply, self(), Reply},
+            {stop, normal, State};
+        'OperationCreated' ->
+            Operation = maps:get(<<"operation">>, JSON),
+            {next_state, async_operation, State#state{ async_operation = erlang:binary_to_list(Operation) }, ?OPERATION_PULL_TIMER};
+        'Failure' ->
+            From ! {reply, self(), Reply},
+            {stop, normal, State}
+    end.
 
+async_operation(timeout, #state{ original_request = Request, from = From, async_operation = AsyncOperation} = State) ->
+    #http_request{ server = Server, port = Port, opts = Opts } = Request,
+    Url = build_url(Server, Port, AsyncOperation),
 
-    {next_state, send_request, State}.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% There should be one instance of this function for each possible
-%% state name. Whenever a gen_fsm receives an event sent using
-%% gen_fsm:sync_send_event/[2,3], the instance of this function with
-%% the same name as the current state name StateName is called to
-%% handle the event.
-%%
-%% @spec send_request(Event, From, State) ->
-%%                   {next_state, NextStateName, NextState} |
-%%                   {next_state, NextStateName, NextState, Timeout} |
-%%                   {reply, Reply, NextStateName, NextState} |
-%%                   {reply, Reply, NextStateName, NextState, Timeout} |
-%%                   {stop, Reason, NewState} |
-%%                   {stop, Reason, Reply, NewState}
-%% @end
-%%--------------------------------------------------------------------
-send_request(_Event, _From, State) ->
-    Reply = ok,
-    {reply, Reply, send_request, State}.
-
+    {ok, #http_reply{ status = StatusCode, json = _JSON} = Reply} = http_get(Url, Opts),
+    case status_code(StatusCode) of
+        'Success' ->
+            From ! {reply, self(), Reply},
+            {stop, normal, State};
+        'Running' ->
+            {next_state, async_operation, State, ?OPERATION_PULL_TIMER}
+    end.
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -213,24 +198,52 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+%% status codes: Code	Meaning
+status_code(100) ->	'OperationCreated';
+status_code(101) ->	'Started';
+status_code(102) ->	'Stopped';
+status_code(103) ->	'Running';
+status_code(104) ->	'Cancelling';
+status_code(105) ->	'Pending';
+status_code(106) ->	'Starting';
+status_code(107) ->	'Stopping';
+status_code(108) ->	'Aborting';
+status_code(109) ->	'Freezing';
+status_code(110) ->	'Frozen';
+status_code(111) ->	'Thawed';
+status_code(200) ->	'Success';
+status_code(400) ->	'Failure';
+status_code(401) ->	'Cancelled'.
+
 
 %% @doc Get request
 %% http --verify no --cert ~/.config/lxc/client.crt --cert-key ~/.config/lxc/client.key https://135.247.171.177:8443/1.0/operations
 http_get(Url, Opts) ->
     { ok, {Status, Header, Body} } = httpc:request(get, {Url, []}, Opts, []),
 
-    {ok, #http_reply{}}.
+    JSON = case proplists:get_value("content-type", Header) of
+               "application/json" -> jsx:decode(erlang:list_to_binary(Body), [return_maps]);
+               _ -> Body
+           end,
+    StatusCode = check_status(Status),
+
+    {ok, #http_reply{ status = StatusCode, json = JSON} }.
 
 http_put(Url, Data, Opts) ->
     { ok, {Status, Header, Body} } = httpc:request(get, {Url, []}, Opts, []),
     {ok, #http_reply{}}.
 
+check_status({"HTTP/1.1", Code, _}) -> Code.
 
-build_url(Server, Port, Resource) ->
-    Url = "https://" ++ Server
+build_url(Server, Port, Resource, Api) ->
+    "https://" ++ Server
         ++ ":" ++ erlang:integer_to_list(Port)
-        ++ "/" ++ ?API ++ encode_resource(Resource),
-    Url.
+        ++ "/" ++ Api ++ encode_resource(Resource).
+
+build_url(Server, Port, Operation) ->
+    "https://" ++ Server
+        ++ ":" ++ erlang:integer_to_list(Port)
+        ++ Operation.
 
 encode_resource(Resource) ->
     encode_resource(Resource, "").
@@ -243,6 +256,7 @@ encode_resource([Head|Tail], Acc) when is_list(Head) ->
     encode_resource(Tail, Acc ++ "/" ++ Head).
 
 
+
 -ifdef(TEST).
 
 url_encoder_test_() ->
@@ -251,9 +265,27 @@ url_encoder_test_() ->
       ?_assert(encode_resource([op, "name", sel]) =:= "/op/name/sel"),
       ?_assert(encode_resource([op, "name", sel, "name"]) =:= "/op/name/sel/name"),
       %% uri
-      ?_assert(build_url("135.247.171.177", 8443, [operations]) =:= "https://135.247.171.177:8443/1.0/operations"),
-      ?_assert(build_url("135.247.171.177", 8443, [operations, "1234"]) =:= "https://135.247.171.177:8443/1.0/operations/1234")
+      ?_assert(build_url("135.247.171.177", 8443, [operations], ?API) =:= "https://135.247.171.177:8443/1.0/operations"),
+      ?_assert(build_url("135.247.171.177", 8443, [operations, "1234"], ?API) =:= "https://135.247.171.177:8443/1.0/operations/1234"),
+      ?_assert(build_url("135.247.171.177", 8443, "/1.0/operations/1234") =:= "https://135.247.171.177:8443/1.0/operations/1234")
     ].
 
-
 -endif.
+
+
+%% opts() ->
+%%     Home = os:getenv("HOME"),
+%%     Cert = Home ++ "/.config/lxc/client.crt",
+%%     CertKey = Home ++ "/.config/lxc/client.key",
+%%     SSLOptions = [%{verify, no},
+%%                   {certfile, Cert},
+%%                   {keyfile, CertKey}
+%%                  ],
+%%     HTTPOptions = [{ssl, SSLOptions}],
+%%     HTTPOptions.
+
+%% test_query() ->
+%% %    application:ensure_all_started(lxd_api),
+%%     Req = #http_request{server = "135.247.171.177", port = 8443, operation = 'GET',
+%%                         resource = "", data = [], opts = opts() },
+%%     lxd_api_httpc:service(Req).

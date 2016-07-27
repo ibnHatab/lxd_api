@@ -253,20 +253,3 @@ code_change(_OldVsn, State, _Extra) ->
 %% snapshot - Create a read-only snapshot of a container.
 %% start  - Changes state of one or more containers to start.
 %% stop   - Changes state of one or more containers to stop.
-
-%% status codes: Code	Meaning
-status_code(100) ->	'OperationCreated';
-status_code(101) ->	'Started';
-status_code(102) ->	'Stopped';
-status_code(103) ->	'Running';
-status_code(104) ->	'Cancelling';
-status_code(105) ->	'Pending';
-status_code(106) ->	'Starting';
-status_code(107) ->	'Stopping';
-status_code(108) ->	'Aborting';
-status_code(109) ->	'Freezing';
-status_code(110) ->	'Frozen';
-status_code(111) ->	'Thawed';
-status_code(200) ->	'Success';
-status_code(400) ->	'Failure';
-status_code(401) ->	'Cancelled'.
