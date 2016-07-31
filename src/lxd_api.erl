@@ -32,7 +32,14 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-%% API structure
+%% @doc Create LXC serer connection
+connect(Server, Port) ->
+    connect(Server, Port, ?DEFAULT_FINGER_PRINT).
+
+connect(Server, Port, Fingerprint) ->
+    lxd_api_sup:start_child(Server, Port, Fingerprint).
+
+%% Resource API structure
 %% /
 %% /1.0
 %% /1.0/certificates
@@ -64,14 +71,6 @@
 %% Ref:
 %%  https://github.com/lxc/lxd/blob/master/doc/rest-api.md
 
-%% @doc Create LXC serer connection
-connect(Server, Port) ->
-    connect(Server, Port, ?DEFAULT_FINGER_PRINT).
-
-connect(Server, Port, Fingerprint) ->
-    lxd_api_sup:start_child(Server, Port, Fingerprint).
-
-
 'GET'(Lxd, Endpoint) ->
     gen_server:call(Lxd, {get, Endpoint}).
 
@@ -86,8 +85,6 @@ connect(Server, Port, Fingerprint) ->
 
 'DELETE'(Lxd, Endpoint) ->
     gen_server:call(Lxd, {delete, Endpoint}).
-
-
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -134,17 +131,6 @@ init([Server, Port, Fingerprint]) ->
 %% @private
 %% @doc
 %% Handling call messages
-%%
-%% @spec handle_call(Request, From, State) ->
-%%                                   {reply, Reply, State} |
-%%                                   {reply, Reply, State, Timeout} |
-%%                                   {noreply, State} |
-%%                                   {noreply, State, Timeout} |
-%%                                   {stop, Reason, Reply, State} |
-%%                                   {stop, Reason, State}
-%% @end
-%%--------------------------------------------------------------------
-
 
 
 handle_call( {get, [certificates]}, _From, State) ->

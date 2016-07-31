@@ -18,7 +18,7 @@
 -include("lxd_api.hrl").
 
 %% API
--export([start_link/2, service/1]).
+-export([start_link/3, service/1, service/2]).
 
 %% gen_fsm callbacks
 -export([init/1, send_request/2, async_operation/2,
@@ -31,6 +31,7 @@
 -record(state, { original_request :: http_request(),
                  from :: pid(),
                  async_operation :: string(),
+                 operation_timeout_ref = nil :: reference(),
                  backoff = 300 :: pos_integer()
                }).
 
@@ -47,7 +48,7 @@
 service(Request) ->
     service(Request, ?OPERATION_TIMEOUT).
 service(Request, Timeout) ->
-    {ok, Worker} = lxd_api_httpc_sup:start_child(Request, self()),
+    {ok, Worker} = lxd_api_httpc_sup:start_child(Request, self(), Timeout),
     gen_fsm:send_event(Worker, go),
     receive
         {reply, Worker, Reply} ->
@@ -65,8 +66,8 @@ service(Request, Timeout) ->
 %% initialize.
 %% @end
 %%--------------------------------------------------------------------
-start_link(Request, From) ->
-    gen_fsm:start_link(?MODULE, [Request, From], []).
+start_link(Request, From, Timeout) ->
+    gen_fsm:start_link(?MODULE, [Request, From, Timeout], []).
 
 %%%===================================================================
 %%% gen_fsm callbacks
@@ -77,16 +78,18 @@ start_link(Request, From) ->
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
-init([Request, From]) ->
-%    process_flag(trap_exit, true),
-    {ok, send_request, #state{ original_request = Request, from = From}}.
+init([Request, From, Timeout]) ->
+    process_flag(trap_exit, true),
+    TimeRef = gen_fsm:send_event_after(Timeout, operation_timeout),
+    {ok, send_request, #state{ original_request = Request, from = From, operation_timeout_ref = TimeRef}}.
 
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
-send_request(go, #state{ original_request = Request, from = From, backoff = Backoff} = State) ->
+send_request(go, #state{ original_request = Request,
+                         from = From, operation_timeout_ref = Ref, backoff = Backoff} = State) ->
     #http_request{ server = Server, port = Port, operation = Operatin,
                    resource = Resource, data = Data, opts = Opts } = Request,
     Url = build_url(Server, Port, Resource, ?API),
@@ -100,16 +103,21 @@ send_request(go, #state{ original_request = Request, from = From, backoff = Back
     case status_code(StatusCode) of
         'Success' ->
             From ! {reply, self(), Reply},
+            gen_fsm:cancel_timer(Ref),
             {stop, normal, State};
         'OperationCreated' ->
             Operation = maps:get(<<"operation">>, JSON),
-            {next_state, async_operation, State#state{ async_operation = erlang:binary_to_list(Operation)}, Backoff};
+            {next_state, async_operation, State#state{ async_operation = erlang:binary_to_list(Operation)}, Backoff };
         'Failure' ->
             From ! {reply, self(), Reply},
+            gen_fsm:cancel_timer(Ref),
             {stop, normal, State}
-    end.
+    end;
+send_request(operation_timeout, #state{from = From} = State) ->
+    From ! {error, operation_timeout},
+    {stop, normal, State}.
 
-async_operation(timeout, #state{ original_request = Request, from = From,
+async_operation(timeout, #state{ original_request = Request, from = From, operation_timeout_ref = Ref,
                                  async_operation = AsyncOperation, backoff = Backoff} = State) ->
     #http_request{ server = Server, port = Port, opts = Opts } = Request,
     Url = build_url(Server, Port, AsyncOperation),
@@ -118,14 +126,20 @@ async_operation(timeout, #state{ original_request = Request, from = From,
     case status_code(StatusCode) of
         'Success' ->
             From ! {reply, self(), Reply},
+            gen_fsm:cancel_timer(Ref),
             {stop, normal, State};
         'Running' ->
             RetryTimer = increment(Backoff, ?OPERATION_PULL_TIMER),
             {next_state, async_operation, State#state{backoff = RetryTimer}, RetryTimer};
         'Failure' ->
             From ! {reply, self(), Reply},
+            gen_fsm:cancel_timer(Ref),
             {stop, normal, State}
-    end.
+    end;
+async_operation(operation_timeout, #state{from = From} = State) ->
+    From ! {error, operation_timeout},
+    {stop, normal, State}.
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc

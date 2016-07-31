@@ -21,3 +21,10 @@ kivra/restclient
 
 XML:
 erlsom
+
+
+* TODO Implement recursion for big lists
+
+* TODO Long-poll API
+
+* TODO websocket noifications

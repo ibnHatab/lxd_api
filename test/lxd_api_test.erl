@@ -20,9 +20,11 @@ return_status_test_() ->
              ok
      end,
      [
-      fun() -> standard() end,
-      fun() -> background() end,
-      fun() -> error_and_failure() end
+      fun() -> operation_timeout() end
+      %% fun() -> standard() end,
+      %% fun() -> background() end,
+      %% fun() -> error_and_failure() end
+
      ]
     }.
 
@@ -96,7 +98,7 @@ background() ->
                                     ]
                                    }
                ),
-    user_default:dbgon(lxd_api_httpc, async_operation),
+%    user_default:dbgon(lxd_api_httpc, async_operation),
     Req = #http_request{server = "135.247.171.177", port = 8443, operation = 'GET',
                         resource = [containers], data = [], opts = opts() },
     {ok, Rep} = lxd_api_httpc:service(Req),
@@ -126,6 +128,20 @@ error_and_failure() ->
     {ok, Rep} = lxd_api_httpc:service(Req),
     ?assertEqual(maps:get(<<"error_code">>, Rep#http_reply.json),
                  Rep#http_reply.status).
+
+operation_timeout() ->
+    ?debugMsg("Starting error_and_failure test"),
+    meck:expect(httpc, request, 4, fun (_A,_B,_C,_D) ->
+                                           timer:sleep(100),
+                                           {ok, {?SUCCES_STATUS, ?SUCCES_HEADER, ?SUCCES_BODY}}
+                                   end),
+
+    Req = #http_request{server = "135.247.171.177", port = 8443, operation = 'GET',
+                        resource = "", data = [], opts = opts() },
+
+    %% user_default:dbgon(lxd_api_httpc),
+    {error, operation_timeout} = lxd_api_httpc:service(Req, 10).
+
 
 opts() ->
     Home = os:getenv("HOME"),
