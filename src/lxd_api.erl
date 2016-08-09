@@ -13,14 +13,15 @@
 -include("lxd_api.hrl").
 
 %% API
--export([start_link/3, connect/2, connect/3]).
+-export([start_link/2, connect/2, authenticate/1,
+         get/2, put/3, patch/3, post/3, delete/2
+        ]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE).
--define(DEFAULT_FINGER_PRINT, <<"">>).
 
 -record(state, {server       :: string(),
                 port         :: pos_integer(),
@@ -34,10 +35,11 @@
 %%%===================================================================
 %% @doc Create LXC serer connection
 connect(Server, Port) ->
-    connect(Server, Port, ?DEFAULT_FINGER_PRINT).
+    lxd_api_assoc_sup:start_child(Server, Port).
 
-connect(Server, Port, Fingerprint) ->
-    lxd_api_sup:start_child(Server, Port, Fingerprint).
+authenticate(Fingerprint) ->
+    ok.
+
 
 %% Resource API structure
 %% /
@@ -71,19 +73,19 @@ connect(Server, Port, Fingerprint) ->
 %% Ref:
 %%  https://github.com/lxc/lxd/blob/master/doc/rest-api.md
 
-'GET'(Lxd, Endpoint) ->
+get(Lxd, Endpoint) ->
     gen_server:call(Lxd, {get, Endpoint}).
 
-'PUT'(Lxd, Endpoint, Data) ->
+put(Lxd, Endpoint, Data) ->
     gen_server:call(Lxd, {put, Endpoint, Data}).
 
-'PATCH'(Lxd, Endpoint, Data) ->
+patch(Lxd, Endpoint, Data) ->
     gen_server:call(Lxd, {patch, Endpoint, Data}).
 
-'POST'(Lxd, Endpoint, Data) ->
+post(Lxd, Endpoint, Data) ->
     gen_server:call(Lxd, {post, Endpoint, Data}).
 
-'DELETE'(Lxd, Endpoint) ->
+delete(Lxd, Endpoint) ->
     gen_server:call(Lxd, {delete, Endpoint}).
 
 %%--------------------------------------------------------------------
@@ -93,8 +95,8 @@ connect(Server, Port, Fingerprint) ->
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Server, Port, Fingerprint) ->
-    gen_server:start_link(?MODULE, [Server, Port, Fingerprint], []).
+start_link(Server, Port) ->
+    gen_server:start_link(?MODULE, [Server, Port], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -111,7 +113,7 @@ start_link(Server, Port, Fingerprint) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Server, Port, Fingerprint]) ->
+init([Server, Port]) ->
     Home = os:getenv("HOME"),
     Cert = Home ++ "/.config/lxc/client.crt",
     CertKey = Home ++ "/.config/lxc/client.key",
@@ -123,46 +125,35 @@ init([Server, Port, Fingerprint]) ->
 
     {ok, #state{server = Server,
                 port = Port,
-                finger_print = Fingerprint,
                 http_opts = HTTPOptions
                }}.
+
 
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
 %% Handling call messages
+%%
+%% @end
+%%--------------------------------------------------------------------
+handle_call({get, Resource}, _From,
+             #state{server=Server,port=Port,http_opts=HTTPOptions} = State) ->
+    Req = #http_request{operation='GET',resource=Resource,
+                        server=Server,port=Port,opts=HTTPOptions},
+    Suported = api_support(get, Resource),
+    if Suported ->
+            case decode_status(lxd_api_httpc:service(Req)) of
+                {ok, Data} ->
+                    {reply, {ok, Data}, State};
+                {error, Error} ->
+                    {reply, {error, Error}, State}
+            end;
+       true ->
+            {reply, {error, unsuported}, State}
+    end;
 
-
-handle_call( {get, [certificates]}, _From, State) ->
+handle_call({put, Resource, Data}, _From, State)->
     {reply, ok, State};
-
-handle_call({get, [certificates, Fingerprint]}, _From, State)->
-    {reply, ok, State};
-
-
-%% handle_call({get, [containers]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [containers, Name]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [containers, Name, exec]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [containers, Name, files]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [containers, Name, snapshots]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [containers, Name, snapshots, Name]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [containers, Name, state]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [containers, Name, logs]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [containers, Name, logs, Logfile]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [events]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [images]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [images, Fingerprint]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [images, Fingerprint, export]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [images, aliases]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [images, aliases, Name]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [networks]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [networks, Name]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [operations]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [operations, Uuid]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [operations, Uuid, wait]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [operations, Uuid, websocket]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [profiles]}, _From, State)-> {reply, ok, State};
-%% handle_call({get, [profiles, Name]}, _From, State)->     {reply, ok, State};
 
 handle_call(_Request, _From, State) ->
     Reply = {error, notsupported},
@@ -220,6 +211,103 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
+%% Private functions
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Describe allowed operations for LXD API 1.0
+api_support(get, Resource) ->
+    case Resource of
+        ["/"]                              -> true;
+        [?API]                             -> true;
+        [certificates]                     -> true;
+        [certificates,_Fingerprint]        -> true;
+        [containers]                       -> true;
+        [containers,_Name]                 -> true;
+        [containers,_Name,state]           -> true;
+        [containers,_Name,files]           -> true;
+        [containers,_Name,snapshots]       -> true;
+        [containers,_Name,snapshots,_Name] -> true;
+        [containers,_Name,logs]            -> true;
+        [containers,_Name,logs,_Logfile]   -> true;
+        [events]                           -> true;
+        [images]                           -> true;
+        [images,_Fingerprint]              -> true;
+        [images,_Fingerprint,export]       -> true;
+        [images,aliases]                   -> true;
+        [images,aliases,_Name]             -> true;
+        [networks]                         -> true;
+        [networks,_Name]                   -> true;
+        [operations]                       -> true;
+        [operations,_Uuid]                 -> true;
+        [operations,_Uuid,wait]            -> true;
+        [operations,_Uuid,websocket]       -> true;
+        [profiles]                         -> true;
+        [profiles,_Name]                   -> true;
+        _ -> false
+    end;
+api_support(put, Resource) ->
+    case Resource of
+        [?API]                             -> true;
+        [containers,_Name]                 -> true;
+        [containers,_Name,state]           -> true;
+        [images,_Fingerprint]              -> true;
+        [images,aliases,_Name]             -> true;
+        [profiles,_Name]                   -> true;
+        _                                  ->
+            false
+    end;
+api_support(patch, Resource) ->
+    case Resource of
+        [?API]                             -> true;
+        [containers,_Name]                 -> true;
+        [images,_Fingerprint]              -> true;
+        [images,aliases,_Name]             -> true;
+        [profiles,_Name]                   -> true;
+        _ ->
+            false
+    end;
+api_support(post, Resource) ->
+    case Resource of
+        [certificates]                     -> true;
+        [containers]                       -> true;
+        [containers,_Name]                 -> true;
+        [containers,_Name,files]           -> true;
+        [containers,_Name,snapshots]       -> true;
+        [containers,_Name,snapshots,_Name] -> true;
+        [containers,_Name,exec]            -> true;
+        [images]                           -> true;
+        [images,_Fingerprint,export]       -> true;
+        [images,aliases]                   -> true;
+        [images,aliases,_Name]             -> true;
+        [profiles]                         -> true;
+        [profiles,_Name]                   -> true;
+        _ ->
+            false
+    end;
+api_support(delete, Resource) ->
+    case Resource of
+        [certificates,_Fingerprint]        -> true;
+        [containers,_Name]                 -> true;
+        [containers,_Name,snapshots,_Name] -> true;
+        [containers,_Name,logs,_Logfile]   -> true;
+        [images,_Fingerprint]              -> true;
+        [images,aliases,_Name]             -> true;
+        [operations,_Uuid]                 -> true;
+        [profiles,_Name]                   -> true;
+        _ ->
+            false
+    end.
+
+
+decode_status({ok, #http_reply{status = Status, json = Data}}) ->
+    %% Unify API error with http error
+    case lxd_api_httpc:status_code(Status) of
+        'Success' -> {ok, Data};
+        ErrorCode -> {error, ErrorCode}
+    end;
+decode_status({error, Error}) ->
+    {error, Error}.
 
 
 %% config - Manage configuration.

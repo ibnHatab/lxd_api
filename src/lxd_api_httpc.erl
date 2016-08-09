@@ -18,7 +18,7 @@
 -include("lxd_api.hrl").
 
 %% API
--export([start_link/3, service/1, service/2]).
+-export([start_link/3, service/1, service/2, status_code/1]).
 
 %% gen_fsm callbacks
 -export([init/1, send_request/2, async_operation/2,
@@ -37,7 +37,6 @@
 
 -define(OPERATION_TIMEOUT, 50000).
 -define(OPERATION_PULL_TIMER, 10000).
--define(API, "1.0").
 
 %%%===================================================================
 %%% API
@@ -91,8 +90,8 @@ init([Request, From, Timeout]) ->
 send_request(go, #state{ original_request = Request,
                          from = From, operation_timeout_ref = Ref, backoff = Backoff} = State) ->
     #http_request{ server = Server, port = Port, operation = Operatin,
-                   resource = Resource, data = Data, opts = Opts } = Request,
-    Url = build_url(Server, Port, Resource, ?API),
+                   resource = Resource, data = Data, opts = Opts, api_version = Api } = Request,
+    Url = build_url(Server, Port, Resource, Api),
 
     {ok, #http_reply{ status = StatusCode, json = JSON} = Reply} =
         case Operatin of
@@ -266,10 +265,12 @@ http_post(Url, Data, Opts) ->
 
 check_status({"HTTP/1.1", Code, _}) -> Code.
 
+build_url(Server, Port, Resource, nil) ->
+    build_url(Server, Port, Resource);
 build_url(Server, Port, Resource, Api) ->
     "https://" ++ Server
         ++ ":" ++ erlang:integer_to_list(Port)
-        ++ "/" ++ Api ++ encode_resource(Resource).
+        ++ Api ++ encode_resource(Resource).
 
 build_url(Server, Port, Operation) ->
     "https://" ++ Server
